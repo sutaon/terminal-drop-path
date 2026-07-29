@@ -10,6 +10,19 @@ if (-not (Test-Path -LiteralPath $ExecutablePath)) {
     & (Join-Path $PSScriptRoot '..\build.ps1')
 }
 
+$unicodeFileName = [string]::Concat(
+    [char]0x9879,
+    [char]0x76EE,
+    [char]0x7F8E,
+    [char]0x5316,
+    '-',
+    [char]0x4F18,
+    [char]0x5316,
+    [char]0x7248,
+    '-v3.txt'
+)
+$unicodePath = 'C:\Users\test\Desktop\' + $unicodeFileName
+
 $cases = @(
     @{
         Name = 'CMD keeps a simple absolute path unquoted'
@@ -26,8 +39,8 @@ $cases = @(
     @{
         Name = 'PowerShell keeps a Unicode path unquoted'
         Shell = 'powershell'
-        Paths = @('C:\Users\test\Desktop\项目美化-优化版-v3.txt')
-        Expected = 'C:\Users\test\Desktop\项目美化-优化版-v3.txt'
+        Paths = @($unicodePath)
+        Expected = $unicodePath
     },
     @{
         Name = 'PowerShell quotes spaces with single quotes'
