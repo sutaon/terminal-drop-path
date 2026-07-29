@@ -33,7 +33,7 @@ DropPath.cmd
 随后将文件或文件夹拖到出现的 `Terminal Drop Path` 小窗口。路径会被输入到原终端的当前输入行中，例如：
 
 ```text
-C:\Users\test\Desktop\项目美化-优化版-v3.txt
+C:\Users\Example\Desktop\示例项目-v3.txt
 ```
 
 工具不会自动按 Enter，你可以继续补充命令或确认内容后再执行。

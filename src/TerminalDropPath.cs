@@ -14,8 +14,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("sutaon")]
 [assembly: System.Reflection.AssemblyProduct("Terminal Drop Path")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 sutaon")]
-[assembly: System.Reflection.AssemblyVersion("0.1.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.1.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.1.1.0")]
 
 namespace TerminalDropPath
 {
@@ -222,7 +222,7 @@ namespace TerminalDropPath
 
         private static void PrintHelp()
         {
-            Console.WriteLine("Terminal Drop Path 0.1.0");
+            Console.WriteLine("Terminal Drop Path 0.1.1");
             Console.WriteLine("Usage:");
             Console.WriteLine("  TerminalDropPath.exe [--shell auto|cmd|powershell]");
             Console.WriteLine("  TerminalDropPath.exe --format-only --shell cmd -- <path> [path...]");
@@ -600,7 +600,7 @@ namespace TerminalDropPath
             using (Form form = new Form())
             using (TextBox textBox = new TextBox())
             {
-                string expected = "C:\\Users\\test\\Desktop\\项目美化-优化版-v3.txt";
+                string expected = "C:\\Users\\Example\\Desktop\\示例项目-v3.txt";
                 form.Text = "Terminal Drop Path Input Test";
                 form.ClientSize = new Size(640, 72);
                 textBox.Location = new Point(12, 20);
