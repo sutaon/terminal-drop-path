@@ -1,0 +1,5 @@
+bin/
+dist/
+*.user
+*.suo
+*.zip

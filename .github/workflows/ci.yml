@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build
+        shell: powershell
+        run: .\build.ps1
+
+      - name: Test
+        shell: powershell
+        run: .\tests\TerminalDropPath.Tests.ps1
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: TerminalDropPath
+          path: |
+            bin/TerminalDropPath.exe
+            DropPath.cmd
+            DropPath.ps1
+            LICENSE
+            README.md
