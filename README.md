@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-Terminal Drop Path 是一个面向 Windows 10/11 传统 CMD 和 PowerShell 控制台的轻量开源工具。它提供一个置顶工具窗，既能把文件或文件夹的完整路径输入回启动它的终端，也能整理终端选区中的多余换行，不依赖 Windows Terminal。
+Terminal Drop Path 是一个面向 Windows 10/11 传统 CMD 和 PowerShell 控制台的轻量开源工具。默认启动后完全隐藏，在后台整理目标终端复制内容中的多余换行；需要拖放文件路径时，也可以显式唤出原来的工具窗。不依赖 Windows Terminal。
 
 ## 功能
 
@@ -13,12 +13,15 @@ Terminal Drop Path 是一个面向 Windows 10/11 传统 CMD 和 PowerShell 控�
 - 只输入路径，不自动执行命令
 - 将终端选区按段落复制，合并段内折行并保留空行
 - 可将命令、URL 等内容强制复制为单行
+- 默认不显示窗口、任务栏按钮或托盘图标
+- 同一目标终端只运行一个实例，重复启动不会叠加监听
+- 目标终端关闭后，隐藏进程自动退出
 - 不联网、不读取拖入文件的内容；只读取并整理启动它的目标终端复制
 - 单个可执行文件，使用 Windows 自带的 .NET Framework 运行
 
 ## 快速开始
 
-从 [Releases](https://github.com/sutaon/terminal-drop-path/releases) 下载 `TerminalDropPath-v0.2.1-windows.zip` 并解压。请不要下载 GitHub 自动生成、需要自行构建的 `Source code` 压缩包。
+从 [Releases](https://github.com/sutaon/terminal-drop-path/releases) 下载 `TerminalDropPath-v0.3.0-windows.zip` 并解压。请不要下载 GitHub 自动生成、需要自行构建的 `Source code` 压缩包。
 
 在 CMD 中运行：
 
@@ -32,7 +35,31 @@ DropPath.cmd
 .\DropPath.ps1
 ```
 
-随后将文件或文件夹拖到出现的 `Terminal Drop Path` 小窗口。路径会被输入到原终端的当前输入行中，例如：
+命令会立即返回，不显示窗口，不创建任务栏按钮或托盘图标。保持这个原终端打开，后台实例就会继续工作；关闭原终端后，它会自动退出。同一个终端中重复运行启动器只会保留一个后台实例。
+
+请在控制台标题栏菜单的“属性 -> 选项”中同时启用“快速编辑模式”（`QuickEdit Mode`）和“启用自动换行选择”（`Enable line wrapping selection`）。随后直接使用：
+
+1. 在原终端中用左键拖动选中文字。
+2. 在终端内点右键完成复制。
+3. 到记事本、Word 或其他文档中正常粘贴。
+
+## 显示拖放窗口
+
+默认后台实例没有可见界面。需要拖入文件或文件夹、切换复制模式、暂停自动整理或手动复制时，可以唤出同一个实例：
+
+CMD：
+
+```bat
+DropPath.cmd --show-window
+```
+
+Windows PowerShell 或 PowerShell 7：
+
+```powershell
+.\DropPath.ps1 -ShowWindow
+```
+
+如果后台实例已经运行，这个命令会显示已有实例，而不是再创建一个监听进程。将文件或文件夹拖到 `Terminal Drop Path` 小窗口后，路径会被输入到原终端的当前输入行中，例如：
 
 ```text
 C:\Users\Example\Desktop\示例项目-v3.txt
@@ -42,11 +69,7 @@ C:\Users\Example\Desktop\示例项目-v3.txt
 
 ## 整理终端复制换行
 
-当终端中的一段长文字在窗口边缘折成多行时，普通复制有时会把显示折行也带到记事本、Word 或其他编辑器中。工具启动后默认开启 `Auto-clean terminal copies`，操作方式是：
-
-1. 在启动本工具的原终端中，用左键拖动选中文字。
-2. 直接在终端内点右键完成复制。
-3. 到记事本、Word 或其他文档中正常粘贴。
+当终端中的一段长文字在窗口边缘折成多行时，普通复制有时会把显示折行也带到记事本、Word 或其他编辑器中。隐藏实例启动后即默认启用自动整理，不需要再点击工具窗口。
 
 请在控制台标题栏菜单的“属性 -> 选项”中同时启用“快速编辑模式”（`QuickEdit Mode`）和“启用自动换行选择”（`Enable line wrapping selection`）。前者让左键拖选后右键执行复制，后者让传统控制台自身精确去掉显示软折行。快捷方式中保存的设置可能覆盖全局控制台设置，修改后需要重新选择文字。
 
@@ -56,7 +79,7 @@ C:\Users\Example\Desktop\示例项目-v3.txt
 
 工具运行期间会接收 Windows 的剪贴板更新通知，但只处理剪贴板所有者恰好是启动它的目标终端的更新；从浏览器、编辑器或其他终端复制的内容不会被读取或改写。目标终端中的 `Ctrl+C` 复制也会触发同样的整理。`Copy selection now` 按钮保留为手动兜底，不是正常流程所必需。
 
-如果内容必须保留每一个真实换行，例如代码、日志、列表、诗歌或表格，请在复制前取消勾选 `Auto-clean terminal copies`，或关闭工具后使用终端原本的复制功能。
+如果内容必须保留每一个真实换行，例如代码、日志、列表、诗歌或表格，请先用 `--show-window` / `-ShowWindow` 唤出界面并取消勾选 `Auto-clean terminal copies`，或者关闭界面停止工具后使用终端原本的复制功能。
 
 > 控制台公开接口无法判断应用程序主动写入的单个换行究竟是“段内折行”还是有语义的真实换行。因此默认模式采用明确规则：单换行属于段内，空行属于段落边界；它不会宣称自动理解所有文本结构。
 
@@ -89,17 +112,19 @@ CMD 即使在双引号内也会展开 `%变量%`，启用延迟展开时还会�
 .\package.ps1 -SkipBuild
 ```
 
-生成文件位于 `bin\TerminalDropPath.exe`，发布压缩包位于 `dist\TerminalDropPath-v0.2.1-windows.zip`。
+生成文件位于 `bin\TerminalDropPath.exe`，发布压缩包位于 `dist\TerminalDropPath-v0.3.0-windows.zip`。
 
 ## 命令行
 
 ```text
-.\bin\TerminalDropPath.exe [--shell auto|cmd|powershell]
+.\bin\TerminalDropPath.exe [--shell auto|cmd|powershell] [--show-window]
 .\bin\TerminalDropPath.exe --format-only --shell cmd -- <path> [path...]
 .\bin\TerminalDropPath.exe --normalize-copy paragraphs|single-line
 ```
 
 `--format-only` 只输出格式化后的路径，供测试和脚本集成使用。
+
+不带 `--show-window` 时，程序默认作为隐藏后台实例运行。CMD 启动器原样转发 `--show-window`；PowerShell 启动器使用 `-ShowWindow`。
 
 `--normalize-copy` 从标准输入按 UTF-8 读取文本，并把无 BOM 的 UTF-8 整理结果写到标准输出。`paragraphs` 合并段内换行并保留空行，`single-line` 删除所有换行。
 

@@ -2,7 +2,7 @@
 
 [中文说明](README.md)
 
-Terminal Drop Path is a lightweight Windows 10/11 companion for classic CMD and PowerShell consoles. Its always-on-top window types dropped file and folder paths back into the terminal that launched it, and it can copy terminal selections without unwanted wrapped-line breaks. Windows Terminal is not required.
+Terminal Drop Path is a lightweight Windows 10/11 companion for classic CMD and PowerShell consoles. It now starts as a completely hidden background copy cleaner by default, while the original path-drop window remains available on demand. Windows Terminal is not required.
 
 ## Features
 
@@ -13,12 +13,15 @@ Terminal Drop Path is a lightweight Windows 10/11 companion for classic CMD and 
 - Types paths without pressing Enter
 - Paragraph-aware copying that joins wrapped lines and keeps blank-line boundaries
 - One-line copying for commands, URLs, paths, and hashes
+- No window, taskbar button, or tray icon in the default mode
+- One listener per target terminal, even when launched repeatedly
+- Automatic background-process exit when the target terminal closes
 - No network access or dropped-file content reads; only target-terminal copies are read or normalized
 - One executable that runs on the built-in .NET Framework
 
 ## Usage
 
-Download and extract `TerminalDropPath-v0.2.1-windows.zip` from [Releases](https://github.com/sutaon/terminal-drop-path/releases). Do not download GitHub's automatically generated `Source code` archives, which require a local build.
+Download and extract `TerminalDropPath-v0.3.0-windows.zip` from [Releases](https://github.com/sutaon/terminal-drop-path/releases). Do not download GitHub's automatically generated `Source code` archives, which require a local build.
 
 From CMD:
 
@@ -32,15 +35,31 @@ From Windows PowerShell or PowerShell 7:
 .\DropPath.ps1
 ```
 
-Drop files or folders onto the `Terminal Drop Path` window. The tool types the formatted paths into the original console input line and leaves execution to you.
+The command returns immediately without showing a window, taskbar button, or tray icon. The background instance stays active while that original terminal remains open and exits automatically when it closes. Repeated launches from the same terminal keep only one instance.
+
+Enable both `Properties -> Options -> QuickEdit Mode` and `Enable line wrapping selection` in the console title-bar menu. Then left-drag to select text, right-click inside the terminal to copy, and paste normally into another document.
+
+## Show the path-drop window
+
+Use the visible interface when you need file or folder dropping, copy-mode controls, pause/resume, or the manual copy fallback.
+
+From CMD:
+
+```bat
+DropPath.cmd --show-window
+```
+
+From Windows PowerShell or PowerShell 7:
+
+```powershell
+.\DropPath.ps1 -ShowWindow
+```
+
+If a hidden instance is already running, this reveals that same instance instead of creating another clipboard listener. Drop files or folders onto the window to type their formatted paths into the original console input line without pressing Enter.
 
 ## Copy wrapped terminal text
 
-When a long paragraph wraps at the edge of the terminal, a normal copy can sometimes carry those display line breaks into Notepad, Word, or another editor. `Auto-clean terminal copies` is enabled by default while the tool is running:
-
-1. Left-drag to select text in the classic console that launched this tool.
-2. Right-click inside that console to copy.
-3. Paste normally into Notepad, Word, or another document.
+When a long paragraph wraps at the edge of the terminal, a normal copy can sometimes carry those display line breaks into Notepad, Word, or another editor. Automatic cleanup is enabled as soon as the hidden instance starts; no tool-window click is required.
 
 Enable both `Properties -> Options -> QuickEdit Mode` and `Enable line wrapping selection` in the console title-bar menu. QuickEdit makes right-click copy a left-drag selection; line-wrapping selection lets the classic console itself remove display-only soft wraps precisely. Settings stored in a console shortcut can override the global console setting; reselect the text after changing it.
 
@@ -50,7 +69,7 @@ Enable both `Properties -> Options -> QuickEdit Mode` and `Enable line wrapping 
 
 While running, the tool receives Windows clipboard-update notifications but processes an update only when the clipboard owner is its original target terminal. Copies from browsers, editors, and other terminals are neither read nor modified. `Ctrl+C` copies made in the target terminal are normalized too. `Copy selection now` remains available as a manual fallback and is not required for the normal workflow.
 
-When every real line break must be retained, such as for source code, logs, lists, poetry, or tables, clear `Auto-clean terminal copies` before copying or close the tool and use the terminal's normal copy behavior.
+When every real line break must be retained, such as for source code, logs, lists, poetry, or tables, reveal the interface with `--show-window` / `-ShowWindow` and clear `Auto-clean terminal copies`, or close the interface to stop the tool before using the terminal's normal copy behavior.
 
 > Public console APIs cannot determine whether a single hard line break emitted by an application is merely paragraph wrapping or a meaningful break. The paragraph mode therefore uses an explicit rule: single breaks are joined and blank lines delimit paragraphs. It does not claim to infer every document structure.
 
@@ -74,15 +93,17 @@ No .NET SDK is required. The build script first uses the .NET Framework compiler
 .\package.ps1 -SkipBuild
 ```
 
-The executable is written to `bin\TerminalDropPath.exe`, and the release archive to `dist\TerminalDropPath-v0.2.1-windows.zip`.
+The executable is written to `bin\TerminalDropPath.exe`, and the release archive to `dist\TerminalDropPath-v0.3.0-windows.zip`.
 
 ## Command line
 
 ```text
-.\bin\TerminalDropPath.exe [--shell auto|cmd|powershell]
+.\bin\TerminalDropPath.exe [--shell auto|cmd|powershell] [--show-window]
 .\bin\TerminalDropPath.exe --format-only --shell cmd -- <path> [path...]
 .\bin\TerminalDropPath.exe --normalize-copy paragraphs|single-line
 ```
+
+Without `--show-window`, the executable runs as a hidden background instance. The CMD launcher forwards `--show-window`; the PowerShell launcher uses `-ShowWindow`.
 
 `--normalize-copy` reads UTF-8 text from standard input and writes normalized UTF-8 without a BOM. `paragraphs` joins single line breaks while keeping blank lines; `single-line` removes every line break.
 
