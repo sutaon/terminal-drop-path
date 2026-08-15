@@ -14,8 +14,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("sutaon")]
 [assembly: System.Reflection.AssemblyProduct("Terminal Drop Path")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 sutaon")]
-[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.2.0.0")]
+[assembly: System.Reflection.AssemblyVersion("0.2.1.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.2.1.0")]
 
 namespace TerminalDropPath
 {
@@ -290,7 +290,7 @@ namespace TerminalDropPath
 
         private static void PrintHelp()
         {
-            Console.WriteLine("Terminal Drop Path 0.2.0");
+            Console.WriteLine("Terminal Drop Path 0.2.1");
             Console.WriteLine("Usage:");
             Console.WriteLine("  TerminalDropPath.exe [--shell auto|cmd|powershell]");
             Console.WriteLine("  TerminalDropPath.exe --format-only --shell cmd -- <path> [path...]");
@@ -617,26 +617,118 @@ namespace TerminalDropPath
         }
     }
 
+    internal static class ClipboardTextCleaner
+    {
+        public static bool TryClean(
+            IntPtr newOwnerWindow,
+            IntPtr expectedOwner,
+            uint copiedSequence,
+            string copiedText,
+            CopyMode mode,
+            out int mergedLineBreaks,
+            out string error)
+        {
+            return TryClean(
+                newOwnerWindow,
+                expectedOwner,
+                copiedSequence,
+                copiedText,
+                mode,
+                null,
+                out mergedLineBreaks,
+                out error);
+        }
+
+        public static bool TryClean(
+            IntPtr newOwnerWindow,
+            IntPtr expectedOwner,
+            uint copiedSequence,
+            string copiedText,
+            CopyMode mode,
+            Func<bool> isExpectedOwnerValid,
+            out int mergedLineBreaks,
+            out string error)
+        {
+            string formatted = CopiedTextFormatter.Format(copiedText, mode);
+            mergedLineBreaks = CopiedTextFormatter.CountLineBreaks(copiedText) -
+                CopiedTextFormatter.CountLineBreaks(formatted);
+            if (string.Equals(formatted, copiedText, StringComparison.Ordinal))
+            {
+                if ((isExpectedOwnerValid != null && !isExpectedOwnerValid()) ||
+                    !ClipboardAccess.IsExpectedState(copiedSequence, expectedOwner))
+                {
+                    error = "The clipboard changed before the terminal copy could be confirmed";
+                    return false;
+                }
+                error = null;
+                return true;
+            }
+
+            return ClipboardAccess.TryReplaceText(
+                newOwnerWindow,
+                formatted,
+                copiedSequence,
+                expectedOwner,
+                isExpectedOwnerValid,
+                out error);
+        }
+    }
+
+    internal static class ClipboardUpdatePolicy
+    {
+        public static bool ShouldQueue(
+            bool autoCleanEnabled,
+            bool targetIdentityValid,
+            IntPtr targetWindow,
+            IntPtr clipboardOwner,
+            uint clipboardSequence)
+        {
+            return autoCleanEnabled &&
+                targetIdentityValid &&
+                targetWindow != IntPtr.Zero &&
+                clipboardOwner == targetWindow &&
+                clipboardSequence != 0;
+        }
+    }
+
     internal sealed class DropPathForm : Form
     {
+        private const int ClipboardUpdateMessage = 0x031D;
+        private const int ClipboardUpdateDebounceMilliseconds = 40;
+        private const uint ProcessSynchronize = 0x00100000;
+        private const uint WaitTimeout = 0x00000102;
         private readonly IntPtr _targetWindow;
+        private readonly CheckBox _autoCleanCheckBox;
+        private readonly System.Windows.Forms.Timer _clipboardUpdateTimer;
         private readonly ComboBox _copyModeSelector;
         private readonly ToolTip _copyToolTip;
         private readonly Label _statusLabel;
         private readonly ComboBox _shellSelector;
         private readonly int _targetProcessId;
+        private readonly uint _targetWindowProcessId;
+        private bool _autoCleanEnabled;
+        private bool _clipboardListenerRegistered;
         private CopyMode _copyMode;
+        private uint _pendingClipboardSequence;
         private ShellMode _shell;
+        private IntPtr _targetWindowProcessHandle;
 
         public DropPathForm(IntPtr targetWindow, int targetProcessId, ShellMode shell)
         {
             _targetWindow = targetWindow;
             _targetProcessId = targetProcessId;
+            uint targetWindowProcessId;
+            NativeMethods.GetWindowThreadProcessId(targetWindow, out targetWindowProcessId);
+            _targetWindowProcessId = targetWindowProcessId;
+            _targetWindowProcessHandle = targetWindowProcessId == 0
+                ? IntPtr.Zero
+                : NativeMethods.OpenProcess(ProcessSynchronize, false, targetWindowProcessId);
             _shell = shell;
             _copyMode = CopyMode.Paragraphs;
+            _autoCleanEnabled = true;
 
             Text = "Terminal Drop Path";
-            ClientSize = new Size(340, 218);
+            ClientSize = new Size(340, 250);
             MinimumSize = Size;
             MaximumSize = Size;
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
@@ -701,36 +793,116 @@ namespace TerminalDropPath
             _copyModeSelector.SelectedIndexChanged += CopyModeSelectorChanged;
             Controls.Add(_copyModeSelector);
 
+            _autoCleanCheckBox = new CheckBox();
+            _autoCleanCheckBox.AutoSize = true;
+            _autoCleanCheckBox.Location = new Point(18, 128);
+            _autoCleanCheckBox.Text = "Auto-clean terminal copies";
+            _autoCleanCheckBox.Checked = true;
+            _autoCleanCheckBox.CheckedChanged += AutoCleanCheckBoxChanged;
+            Controls.Add(_autoCleanCheckBox);
+
             Button copyButton = new Button();
-            copyButton.Location = new Point(18, 128);
-            copyButton.Size = new Size(304, 32);
-            copyButton.Text = "Copy terminal selection";
+            copyButton.Location = new Point(18, 157);
+            copyButton.Size = new Size(304, 30);
+            copyButton.Text = "Copy selection now";
             copyButton.UseVisualStyleBackColor = true;
             copyButton.Click += OnCopySelection;
             Controls.Add(copyButton);
 
             _copyToolTip = new ToolTip();
-            _copyToolTip.SetToolTip(copyButton, "Select text in the target terminal, then copy it without unwanted wrapped-line breaks.");
+            _copyToolTip.SetToolTip(copyButton, "Manual fallback for copying the current target-terminal selection.");
+            _copyToolTip.SetToolTip(
+                _autoCleanCheckBox,
+                "Cleans right-click and Ctrl+C copies from the target terminal only.");
+
+            _clipboardUpdateTimer = new System.Windows.Forms.Timer();
+            _clipboardUpdateTimer.Interval = ClipboardUpdateDebounceMilliseconds;
+            _clipboardUpdateTimer.Tick += OnClipboardUpdateTimerTick;
 
             _statusLabel = new Label();
             _statusLabel.AutoEllipsis = true;
-            _statusLabel.Location = new Point(18, 178);
+            _statusLabel.Location = new Point(18, 208);
             _statusLabel.Size = new Size(304, 24);
-            _statusLabel.Text = "Ready";
+            _statusLabel.Text = "Starting auto-clean...";
             _statusLabel.ForeColor = Color.FromArgb(74, 85, 104);
             Controls.Add(_statusLabel);
 
             DragEnter += OnDragEnter;
             DragDrop += OnDragDrop;
+            Shown += OnFormShown;
             FormClosed += delegate(object sender, FormClosedEventArgs args)
             {
+                if (_clipboardListenerRegistered)
+                {
+                    NativeMethods.RemoveClipboardFormatListener(Handle);
+                    _clipboardListenerRegistered = false;
+                }
+                _clipboardUpdateTimer.Stop();
+                _clipboardUpdateTimer.Tick -= OnClipboardUpdateTimerTick;
+                _clipboardUpdateTimer.Dispose();
+                if (_targetWindowProcessHandle != IntPtr.Zero)
+                {
+                    NativeMethods.CloseHandle(_targetWindowProcessHandle);
+                    _targetWindowProcessHandle = IntPtr.Zero;
+                }
+                Shown -= OnFormShown;
                 _shellSelector.SelectedIndexChanged -= ShellSelectorChanged;
                 _copyModeSelector.SelectedIndexChanged -= CopyModeSelectorChanged;
+                _autoCleanCheckBox.CheckedChanged -= AutoCleanCheckBoxChanged;
                 copyButton.Click -= OnCopySelection;
                 _copyToolTip.Dispose();
             };
 
             PositionNearTarget();
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            base.WndProc(ref message);
+
+            if (message.Msg != ClipboardUpdateMessage)
+            {
+                return;
+            }
+
+            uint sequence = NativeMethods.GetClipboardSequenceNumber();
+            bool targetIdentityValid = IsOriginalTargetWindow();
+            if (!targetIdentityValid)
+            {
+                DisableAutoClean("Target terminal closed; auto-clean stopped");
+                return;
+            }
+            if (!ClipboardUpdatePolicy.ShouldQueue(
+                    _autoCleanEnabled,
+                    targetIdentityValid,
+                    _targetWindow,
+                    NativeMethods.GetClipboardOwner(),
+                    sequence))
+            {
+                return;
+            }
+
+            _pendingClipboardSequence = sequence;
+            _clipboardUpdateTimer.Stop();
+            _clipboardUpdateTimer.Start();
+        }
+
+        private void OnFormShown(object sender, EventArgs args)
+        {
+            if (!IsOriginalTargetWindow())
+            {
+                DisableAutoClean("Could not track the target terminal; auto-clean disabled");
+                return;
+            }
+
+            if (!NativeMethods.AddClipboardFormatListener(Handle))
+            {
+                DisableAutoClean("Auto-clean unavailable (Windows error " + Marshal.GetLastWin32Error() + ")");
+                return;
+            }
+
+            _clipboardListenerRegistered = true;
+            SetStatus("Auto-clean ready", false);
         }
 
         private void ShellSelectorChanged(object sender, EventArgs args)
@@ -741,6 +913,102 @@ namespace TerminalDropPath
         private void CopyModeSelectorChanged(object sender, EventArgs args)
         {
             _copyMode = _copyModeSelector.SelectedIndex == 1 ? CopyMode.SingleLine : CopyMode.Paragraphs;
+        }
+
+        private void AutoCleanCheckBoxChanged(object sender, EventArgs args)
+        {
+            _autoCleanEnabled = _autoCleanCheckBox.Checked;
+            if (!_autoCleanEnabled)
+            {
+                _clipboardUpdateTimer.Stop();
+                _pendingClipboardSequence = 0;
+            }
+            SetStatus(_autoCleanEnabled ? "Auto-clean enabled" : "Auto-clean paused", false);
+        }
+
+        private void OnClipboardUpdateTimerTick(object sender, EventArgs args)
+        {
+            _clipboardUpdateTimer.Stop();
+            uint expectedSequence = _pendingClipboardSequence;
+            _pendingClipboardSequence = 0;
+
+            uint currentSequence = NativeMethods.GetClipboardSequenceNumber();
+            bool targetIdentityValid = IsOriginalTargetWindow();
+            if (!targetIdentityValid)
+            {
+                DisableAutoClean("Target terminal closed; auto-clean stopped");
+                return;
+            }
+            if (currentSequence != expectedSequence ||
+                !ClipboardUpdatePolicy.ShouldQueue(
+                    _autoCleanEnabled,
+                    targetIdentityValid,
+                    _targetWindow,
+                    NativeMethods.GetClipboardOwner(),
+                    currentSequence))
+            {
+                return;
+            }
+
+            string copiedText;
+            string error;
+            if (!ClipboardAccess.TryReadOwnedText(expectedSequence, _targetWindow, out copiedText, out error))
+            {
+                if (NativeMethods.GetClipboardSequenceNumber() == expectedSequence &&
+                    NativeMethods.GetClipboardOwner() == _targetWindow)
+                {
+                    SetStatus(error, true);
+                }
+                return;
+            }
+
+            int mergedLineBreaks;
+            if (!ClipboardTextCleaner.TryClean(
+                    Handle,
+                    _targetWindow,
+                    expectedSequence,
+                    copiedText,
+                    _copyMode,
+                    IsOriginalTargetWindow,
+                    out mergedLineBreaks,
+                    out error))
+            {
+                SetStatus(error, true);
+                return;
+            }
+
+            SetCopyStatus("Terminal copy cleaned", mergedLineBreaks);
+        }
+
+        private bool IsOriginalTargetWindow()
+        {
+            if (_targetWindowProcessHandle == IntPtr.Zero ||
+                NativeMethods.WaitForSingleObject(_targetWindowProcessHandle, 0) != WaitTimeout ||
+                !NativeMethods.IsWindow(_targetWindow))
+            {
+                return false;
+            }
+
+            uint currentProcessId;
+            NativeMethods.GetWindowThreadProcessId(_targetWindow, out currentProcessId);
+            return currentProcessId != 0 && currentProcessId == _targetWindowProcessId;
+        }
+
+        private void DisableAutoClean(string message)
+        {
+            if (_clipboardListenerRegistered)
+            {
+                NativeMethods.RemoveClipboardFormatListener(Handle);
+                _clipboardListenerRegistered = false;
+            }
+            _clipboardUpdateTimer.Stop();
+            _pendingClipboardSequence = 0;
+            _autoCleanEnabled = false;
+            _autoCleanCheckBox.CheckedChanged -= AutoCleanCheckBoxChanged;
+            _autoCleanCheckBox.Checked = false;
+            _autoCleanCheckBox.Enabled = false;
+            _autoCleanCheckBox.CheckedChanged += AutoCleanCheckBoxChanged;
+            SetStatus(message, true);
         }
 
         private void OnCopySelection(object sender, EventArgs args)
@@ -755,14 +1023,7 @@ namespace TerminalDropPath
                 return;
             }
 
-            if (mergedLineBreaks == 0)
-            {
-                SetStatus("Copied; no extra line breaks found", false);
-            }
-            else
-            {
-                SetStatus("Copied; merged " + mergedLineBreaks + (mergedLineBreaks == 1 ? " line break" : " line breaks"), false);
-            }
+            SetCopyStatus("Copied", mergedLineBreaks);
         }
 
         private void OnDragEnter(object sender, DragEventArgs args)
@@ -809,6 +1070,21 @@ namespace TerminalDropPath
             _statusLabel.ForeColor = isError
                 ? Color.FromArgb(176, 42, 55)
                 : Color.FromArgb(49, 103, 72);
+        }
+
+        private void SetCopyStatus(string prefix, int mergedLineBreaks)
+        {
+            if (mergedLineBreaks == 0)
+            {
+                SetStatus(prefix + "; line breaks unchanged", false);
+            }
+            else
+            {
+                SetStatus(
+                    prefix + "; merged " + mergedLineBreaks +
+                    (mergedLineBreaks == 1 ? " line break" : " line breaks"),
+                    false);
+            }
         }
 
         private void PositionNearTarget()
@@ -899,10 +1175,14 @@ namespace TerminalDropPath
                     return false;
                 }
 
-                string formatted = CopiedTextFormatter.Format(copiedText, mode);
-                mergedLineBreaks = CopiedTextFormatter.CountLineBreaks(copiedText) - CopiedTextFormatter.CountLineBreaks(formatted);
-                if (!string.Equals(formatted, copiedText, StringComparison.Ordinal) &&
-                    !ClipboardAccess.TryReplaceText(clipboardOwnerWindow, formatted, copiedSequence, targetWindow, out error))
+                if (!ClipboardTextCleaner.TryClean(
+                        clipboardOwnerWindow,
+                        targetWindow,
+                        copiedSequence,
+                        copiedText,
+                        mode,
+                        out mergedLineBreaks,
+                        out error))
                 {
                     return false;
                 }
@@ -936,10 +1216,7 @@ namespace TerminalDropPath
             {
                 uint observedSequence = NativeMethods.GetClipboardSequenceNumber();
                 if (observedSequence != previousSequence &&
-                    NativeMethods.GetClipboardOwner() == expectedOwner &&
-                    TryGetText(out text, out error) &&
-                    NativeMethods.GetClipboardSequenceNumber() == observedSequence &&
-                    NativeMethods.GetClipboardOwner() == expectedOwner)
+                    TryReadOwnedText(observedSequence, expectedOwner, out text, out error))
                 {
                     copiedSequence = observedSequence;
                     return true;
@@ -954,11 +1231,48 @@ namespace TerminalDropPath
             return false;
         }
 
+        public static bool TryReadOwnedText(
+            uint expectedSequence,
+            IntPtr expectedOwner,
+            out string text,
+            out string error)
+        {
+            text = null;
+            if (NativeMethods.GetClipboardSequenceNumber() != expectedSequence ||
+                NativeMethods.GetClipboardOwner() != expectedOwner)
+            {
+                error = "The clipboard changed before the terminal copy could be read";
+                return false;
+            }
+
+            if (!TryGetText(out text, out error))
+            {
+                return false;
+            }
+
+            if (NativeMethods.GetClipboardSequenceNumber() != expectedSequence ||
+                NativeMethods.GetClipboardOwner() != expectedOwner)
+            {
+                text = null;
+                error = "The clipboard changed while the terminal copy was being read";
+                return false;
+            }
+
+            return true;
+        }
+
+        public static bool IsExpectedState(uint expectedSequence, IntPtr expectedOwner)
+        {
+            return NativeMethods.GetClipboardSequenceNumber() == expectedSequence &&
+                NativeMethods.GetClipboardOwner() == expectedOwner;
+        }
+
         public static bool TryReplaceText(
             IntPtr newOwnerWindow,
             string text,
             uint expectedSequence,
             IntPtr expectedOwner,
+            Func<bool> isExpectedOwnerValid,
             out string error)
         {
             IntPtr globalMemory = IntPtr.Zero;
@@ -1012,7 +1326,8 @@ namespace TerminalDropPath
 
                     try
                     {
-                        if (NativeMethods.GetClipboardSequenceNumber() != expectedSequence ||
+                        if ((isExpectedOwnerValid != null && !isExpectedOwnerValid()) ||
+                            NativeMethods.GetClipboardSequenceNumber() != expectedSequence ||
                             NativeMethods.GetClipboardOwner() != expectedOwner)
                         {
                             error = "The clipboard changed before the cleaned text could be written; copy again";
@@ -1380,6 +1695,12 @@ namespace TerminalDropPath
         internal static extern uint GetConsoleProcessList(uint[] processList, uint processCount);
 
         [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool GetConsoleSelectionInfo(out CONSOLE_SELECTION_INFO selectionInfo);
 
@@ -1388,6 +1709,14 @@ namespace TerminalDropPath
 
         [DllImport("user32.dll")]
         internal static extern IntPtr GetClipboardOwner();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool AddClipboardFormatListener(IntPtr window);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool RemoveClipboardFormatListener(IntPtr window);
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -1445,6 +1774,9 @@ namespace TerminalDropPath
         [DllImport("user32.dll")]
         internal static extern uint GetWindowThreadProcessId(IntPtr window, IntPtr processId);
 
+        [DllImport("user32.dll", EntryPoint = "GetWindowThreadProcessId")]
+        internal static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+
         [DllImport("kernel32.dll")]
         internal static extern uint GetCurrentThreadId();
 
@@ -1480,7 +1812,7 @@ namespace TerminalDropPath
 
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CloseHandle(IntPtr handle);
+        internal static extern bool CloseHandle(IntPtr handle);
 
         internal static int GetParentProcessId(int processId)
         {

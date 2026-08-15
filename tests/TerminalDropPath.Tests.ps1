@@ -281,12 +281,94 @@ foreach ($case in $normalizeCases) {
     }
 }
 
+$policyType = [Reflection.Assembly]::LoadFrom((Resolve-Path -LiteralPath $ExecutablePath).Path).GetType(
+    'TerminalDropPath.ClipboardUpdatePolicy',
+    $true
+)
+$shouldQueueMethod = $policyType.GetMethod(
+    'ShouldQueue',
+    [Reflection.BindingFlags]::Public -bor [Reflection.BindingFlags]::Static
+)
+$clipboardPolicyCases = @(
+    @{
+        Name = 'Clipboard listener accepts the target terminal owner'
+        Enabled = $true
+        TargetValid = $true
+        Target = [IntPtr]42
+        Owner = [IntPtr]42
+        Sequence = [uint32]7
+        Expected = $true
+    },
+    @{
+        Name = 'Clipboard listener ignores copies from other applications'
+        Enabled = $true
+        TargetValid = $true
+        Target = [IntPtr]42
+        Owner = [IntPtr]99
+        Sequence = [uint32]7
+        Expected = $false
+    },
+    @{
+        Name = 'Clipboard listener ignores updates while paused'
+        Enabled = $false
+        TargetValid = $true
+        Target = [IntPtr]42
+        Owner = [IntPtr]42
+        Sequence = [uint32]7
+        Expected = $false
+    },
+    @{
+        Name = 'Clipboard listener rejects a missing target window'
+        Enabled = $true
+        TargetValid = $true
+        Target = [IntPtr]::Zero
+        Owner = [IntPtr]::Zero
+        Sequence = [uint32]7
+        Expected = $false
+    },
+    @{
+        Name = 'Clipboard listener rejects an invalid sequence number'
+        Enabled = $true
+        TargetValid = $true
+        Target = [IntPtr]42
+        Owner = [IntPtr]42
+        Sequence = [uint32]0
+        Expected = $false
+    },
+    @{
+        Name = 'Clipboard listener rejects a reused target window handle'
+        Enabled = $true
+        TargetValid = $false
+        Target = [IntPtr]42
+        Owner = [IntPtr]42
+        Sequence = [uint32]7
+        Expected = $false
+    }
+)
+
+foreach ($case in $clipboardPolicyCases) {
+    $arguments = [object[]]@(
+        $case.Enabled,
+        $case.TargetValid,
+        $case.Target,
+        $case.Owner,
+        $case.Sequence
+    )
+    $actual = [bool]$shouldQueueMethod.Invoke($null, $arguments)
+    if ($actual -ne $case.Expected) {
+        $failures += "$($case.Name): expected [$($case.Expected)] but got [$actual]"
+    }
+    else {
+        Write-Host "PASS  $($case.Name)"
+    }
+}
+
 $helpOutput = (& $ExecutablePath --help) -join "`n"
-if ($LASTEXITCODE -ne 0 -or $helpOutput -notmatch 'Terminal Drop Path 0\.2\.0') {
-    $failures += 'Help output does not report version 0.2.0.'
+if ($LASTEXITCODE -ne 0 -or $helpOutput -notmatch 'Terminal Drop Path 0\.2\.1') {
+    $failures += 'Help output does not report version 0.2.1.'
 }
 else {
-    Write-Host 'PASS  Help reports version 0.2.0'
+    Write-Host 'PASS  Help reports version 0.2.1'
 }
 
 $invalidMode = Invoke-NormalizeCopy -Mode 'invalid' -InputText 'text'
@@ -344,6 +426,6 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 
-$totalTests = $cases.Count + $normalizeCases.Count + 7
+$totalTests = $cases.Count + $normalizeCases.Count + $clipboardPolicyCases.Count + 7
 Write-Host "All $totalTests tests passed."
 exit 0
