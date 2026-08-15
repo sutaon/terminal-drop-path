@@ -8,5 +8,5 @@ if not exist "%DROP_PATH_EXE%" (
     if errorlevel 1 exit /b 1
 )
 
-"%DROP_PATH_EXE%" --shell cmd
+"%DROP_PATH_EXE%" --shell cmd %*
 exit /b %errorlevel%

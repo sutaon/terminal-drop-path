@@ -364,11 +364,31 @@ foreach ($case in $clipboardPolicyCases) {
 }
 
 $helpOutput = (& $ExecutablePath --help) -join "`n"
-if ($LASTEXITCODE -ne 0 -or $helpOutput -notmatch 'Terminal Drop Path 0\.2\.1') {
-    $failures += 'Help output does not report version 0.2.1.'
+if ($LASTEXITCODE -ne 0 -or
+    $helpOutput -notmatch 'Terminal Drop Path 0\.3\.0' -or
+    $helpOutput -notmatch '--show-window') {
+    $failures += 'Help output does not report version 0.3.0 and the visible-window option.'
 }
 else {
-    Write-Host 'PASS  Help reports version 0.2.1'
+    Write-Host 'PASS  Help reports version 0.3.0 and --show-window'
+}
+
+$backgroundSelfTest = Invoke-TerminalDropPath -Arguments '--background-self-test'
+if ($backgroundSelfTest.ExitCode -ne 0 -or
+    $backgroundSelfTest.Output -notmatch 'Hidden background lifecycle self-test passed') {
+    $failures += "Hidden background lifecycle self-test failed: $($backgroundSelfTest.Error)"
+}
+else {
+    Write-Host 'PASS  Default background mode is hidden, single-instance, and target-bound'
+}
+
+$invalidVisibleOperation = Invoke-TerminalDropPath -Arguments '--show-window --format-only --shell cmd -- C:\Example.txt'
+if ($invalidVisibleOperation.ExitCode -ne 2 -or
+    $invalidVisibleOperation.Error -notmatch 'cannot be combined') {
+    $failures += '--show-window was not rejected when combined with a non-GUI operation.'
+}
+else {
+    Write-Host 'PASS  --show-window rejects incompatible command-line operations'
 }
 
 $invalidMode = Invoke-NormalizeCopy -Mode 'invalid' -InputText 'text'
@@ -426,6 +446,6 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 
-$totalTests = $cases.Count + $normalizeCases.Count + $clipboardPolicyCases.Count + 7
+$totalTests = $cases.Count + $normalizeCases.Count + $clipboardPolicyCases.Count + 9
 Write-Host "All $totalTests tests passed."
 exit 0

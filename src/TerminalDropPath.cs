@@ -14,8 +14,8 @@ using System.Windows.Forms;
 [assembly: System.Reflection.AssemblyCompany("sutaon")]
 [assembly: System.Reflection.AssemblyProduct("Terminal Drop Path")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 sutaon")]
-[assembly: System.Reflection.AssemblyVersion("0.2.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.2.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.3.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.3.0.0")]
 
 namespace TerminalDropPath
 {
@@ -34,10 +34,12 @@ namespace TerminalDropPath
 
     internal sealed class Options
     {
+        public bool BackgroundSelfTest;
         public bool FormatOnly;
         public bool InputSelfTest;
         public bool NormalizeCopy;
         public bool ShowHelp;
+        public bool ShowWindow;
         public int TargetProcessId;
         public long TargetWindow;
         public CopyMode Copy = CopyMode.Paragraphs;
@@ -67,9 +69,17 @@ namespace TerminalDropPath
                 {
                     options.FormatOnly = true;
                 }
+                else if (argument == "--background-self-test")
+                {
+                    options.BackgroundSelfTest = true;
+                }
                 else if (argument == "--input-self-test")
                 {
                     options.InputSelfTest = true;
+                }
+                else if (argument == "--show-window")
+                {
+                    options.ShowWindow = true;
                 }
                 else if (argument == "--normalize-copy")
                 {
@@ -122,9 +132,23 @@ namespace TerminalDropPath
             }
 
             if (options.NormalizeCopy && (options.FormatOnly || options.InputSelfTest || options.Paths.Count > 0 ||
+                options.BackgroundSelfTest || options.ShowWindow ||
                 options.TargetWindow != 0 || options.TargetProcessId != 0))
             {
                 error = "--normalize-copy cannot be combined with another operation or path arguments.";
+                return false;
+            }
+
+            if (options.BackgroundSelfTest && (options.FormatOnly || options.InputSelfTest || options.ShowWindow ||
+                options.Paths.Count > 0 || options.TargetWindow != 0 || options.TargetProcessId != 0))
+            {
+                error = "--background-self-test cannot be combined with another operation or path arguments.";
+                return false;
+            }
+
+            if (options.ShowWindow && (options.FormatOnly || options.InputSelfTest || options.Paths.Count > 0))
+            {
+                error = "--show-window cannot be combined with another operation or path arguments.";
                 return false;
             }
 
@@ -204,6 +228,11 @@ namespace TerminalDropPath
                 return NormalizeCopiedText(options.Copy);
             }
 
+            if (options.BackgroundSelfTest)
+            {
+                return BackgroundSelfTest.Run(Application.ExecutablePath);
+            }
+
             ShellMode shell = options.Shell == ShellMode.Auto ? ShellDetector.Detect() : options.Shell;
 
             if (options.FormatOnly)
@@ -227,36 +256,150 @@ namespace TerminalDropPath
 
             if (options.TargetWindow == 0)
             {
-                return LaunchDetached(shell);
+                return LaunchDetached(shell, options.ShowWindow);
             }
 
             IntPtr targetWindow = new IntPtr(options.TargetWindow);
             if (!NativeMethods.IsWindow(targetWindow))
             {
-                MessageBox.Show(
-                    "The terminal window is no longer available. Start Terminal Drop Path from the target CMD or PowerShell window again.",
-                    "Terminal Drop Path",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                if (options.ShowWindow)
+                {
+                    MessageBox.Show(
+                        "The terminal window is no longer available. Start Terminal Drop Path from the target CMD or PowerShell window again.",
+                        "Terminal Drop Path",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
                 return 1;
             }
 
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new DropPathForm(targetWindow, options.TargetProcessId, shell));
-            return 0;
+            return RunAttached(targetWindow, options.TargetProcessId, shell, options.ShowWindow);
         }
 
-        private static int LaunchDetached(ShellMode shell)
+        private static int RunAttached(IntPtr targetWindow, int targetProcessId, ShellMode shell, bool showWindow)
+        {
+            string instanceKey = GetInstanceKey(targetWindow);
+            if (instanceKey == null)
+            {
+                return 1;
+            }
+
+            string mutexName = @"Local\TerminalDropPath.Instance." + instanceKey;
+            string showEventName = @"Local\TerminalDropPath.ShowWindow." + instanceKey;
+            if (showWindow && TrySignalExistingInstance(showEventName, 1))
+            {
+                return 0;
+            }
+
+            Mutex instanceMutex = null;
+            bool ownsMutex = false;
+            try
+            {
+                instanceMutex = new Mutex(true, mutexName, out ownsMutex);
+                if (!ownsMutex)
+                {
+                    return (!showWindow || TrySignalExistingInstance(showEventName, 40))
+                        ? 0
+                        : 1;
+                }
+
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                using (EventWaitHandle showWindowEvent = new EventWaitHandle(
+                    false,
+                    EventResetMode.AutoReset,
+                    showEventName))
+                using (DropPathForm form = new DropPathForm(
+                    targetWindow,
+                    targetProcessId,
+                    shell,
+                    showWindowEvent))
+                using (DropPathApplicationContext applicationContext = new DropPathApplicationContext(form))
+                {
+                    if (!form.StartMonitoring(showWindow))
+                    {
+                        return 1;
+                    }
+
+                    Application.Run(applicationContext);
+                    return 0;
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return 1;
+            }
+            finally
+            {
+                if (ownsMutex && instanceMutex != null)
+                {
+                    instanceMutex.ReleaseMutex();
+                }
+                if (instanceMutex != null)
+                {
+                    instanceMutex.Dispose();
+                }
+            }
+        }
+
+        private static string GetInstanceKey(IntPtr targetWindow)
+        {
+            uint targetWindowProcessId;
+            NativeMethods.GetWindowThreadProcessId(targetWindow, out targetWindowProcessId);
+            if (targetWindowProcessId == 0)
+            {
+                return null;
+            }
+
+            ulong windowValue = unchecked((ulong)targetWindow.ToInt64());
+            return targetWindowProcessId.ToString("X8") + "." + windowValue.ToString("X16");
+        }
+
+        private static bool TrySignalExistingInstance(string eventName, int attempts)
+        {
+            for (int attempt = 0; attempt < attempts; attempt++)
+            {
+                try
+                {
+                    using (EventWaitHandle showWindowEvent = EventWaitHandle.OpenExisting(eventName))
+                    {
+                        showWindowEvent.Set();
+                        return true;
+                    }
+                }
+                catch (WaitHandleCannotBeOpenedException)
+                {
+                    if (attempt + 1 < attempts)
+                    {
+                        Thread.Sleep(25);
+                    }
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        private static int LaunchDetached(ShellMode shell, bool showWindow)
         {
             IntPtr consoleWindow = NativeMethods.GetConsoleWindow();
             if (consoleWindow == IntPtr.Zero || !NativeMethods.IsWindowVisible(consoleWindow))
             {
-                MessageBox.Show(
-                    "Start this tool from a classic CMD or PowerShell console. Windows Terminal already supports dropping paths directly into its input line.",
-                    "Terminal Drop Path",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                const string message = "Start this tool from a classic CMD or PowerShell console. Windows Terminal already supports dropping paths directly into its input line.";
+                if (showWindow)
+                {
+                    MessageBox.Show(
+                        message,
+                        "Terminal Drop Path",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                }
+                else
+                {
+                    Console.Error.WriteLine(message);
+                }
                 return 1;
             }
 
@@ -271,10 +414,11 @@ namespace TerminalDropPath
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = Application.ExecutablePath;
             startInfo.Arguments = "--target-hwnd " + consoleWindow.ToInt64() +
-                " --target-pid " + targetProcessId + " --shell " + shellArgument;
+                " --target-pid " + targetProcessId + " --shell " + shellArgument +
+                (showWindow ? " --show-window" : string.Empty);
             startInfo.UseShellExecute = false;
             startInfo.CreateNoWindow = true;
-            startInfo.WindowStyle = ProcessWindowStyle.Normal;
+            startInfo.WindowStyle = showWindow ? ProcessWindowStyle.Normal : ProcessWindowStyle.Hidden;
 
             try
             {
@@ -283,16 +427,16 @@ namespace TerminalDropPath
             }
             catch (Exception exception)
             {
-                Console.Error.WriteLine("Unable to start the drop window: " + exception.Message);
+                Console.Error.WriteLine("Unable to start Terminal Drop Path: " + exception.Message);
                 return 1;
             }
         }
 
         private static void PrintHelp()
         {
-            Console.WriteLine("Terminal Drop Path 0.2.1");
+            Console.WriteLine("Terminal Drop Path 0.3.0");
             Console.WriteLine("Usage:");
-            Console.WriteLine("  TerminalDropPath.exe [--shell auto|cmd|powershell]");
+            Console.WriteLine("  TerminalDropPath.exe [--shell auto|cmd|powershell] [--show-window]");
             Console.WriteLine("  TerminalDropPath.exe --format-only --shell cmd -- <path> [path...]");
             Console.WriteLine("  TerminalDropPath.exe --normalize-copy paragraphs|single-line < input.txt");
         }
@@ -691,10 +835,54 @@ namespace TerminalDropPath
         }
     }
 
+    internal sealed class DropPathApplicationContext : ApplicationContext
+    {
+        private readonly DropPathForm _form;
+        private bool _exiting;
+
+        public DropPathApplicationContext(DropPathForm form)
+        {
+            _form = form;
+            _form.FormClosed += OnFormClosed;
+            _form.Disposed += OnFormDisposed;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _form.FormClosed -= OnFormClosed;
+                _form.Disposed -= OnFormDisposed;
+            }
+            base.Dispose(disposing);
+        }
+
+        private void OnFormClosed(object sender, FormClosedEventArgs args)
+        {
+            ExitOnce();
+        }
+
+        private void OnFormDisposed(object sender, EventArgs args)
+        {
+            ExitOnce();
+        }
+
+        private void ExitOnce()
+        {
+            if (_exiting)
+            {
+                return;
+            }
+            _exiting = true;
+            ExitThread();
+        }
+    }
+
     internal sealed class DropPathForm : Form
     {
         private const int ClipboardUpdateMessage = 0x031D;
         private const int ClipboardUpdateDebounceMilliseconds = 40;
+        private const int InstanceCommandIntervalMilliseconds = 250;
         private const uint ProcessSynchronize = 0x00100000;
         private const uint WaitTimeout = 0x00000102;
         private readonly IntPtr _targetWindow;
@@ -702,6 +890,8 @@ namespace TerminalDropPath
         private readonly System.Windows.Forms.Timer _clipboardUpdateTimer;
         private readonly ComboBox _copyModeSelector;
         private readonly ToolTip _copyToolTip;
+        private readonly System.Windows.Forms.Timer _instanceCommandTimer;
+        private readonly EventWaitHandle _showWindowEvent;
         private readonly Label _statusLabel;
         private readonly ComboBox _shellSelector;
         private readonly int _targetProcessId;
@@ -713,10 +903,15 @@ namespace TerminalDropPath
         private ShellMode _shell;
         private IntPtr _targetWindowProcessHandle;
 
-        public DropPathForm(IntPtr targetWindow, int targetProcessId, ShellMode shell)
+        public DropPathForm(
+            IntPtr targetWindow,
+            int targetProcessId,
+            ShellMode shell,
+            EventWaitHandle showWindowEvent)
         {
             _targetWindow = targetWindow;
             _targetProcessId = targetProcessId;
+            _showWindowEvent = showWindowEvent;
             uint targetWindowProcessId;
             NativeMethods.GetWindowThreadProcessId(targetWindow, out targetWindowProcessId);
             _targetWindowProcessId = targetWindowProcessId;
@@ -819,6 +1014,10 @@ namespace TerminalDropPath
             _clipboardUpdateTimer.Interval = ClipboardUpdateDebounceMilliseconds;
             _clipboardUpdateTimer.Tick += OnClipboardUpdateTimerTick;
 
+            _instanceCommandTimer = new System.Windows.Forms.Timer();
+            _instanceCommandTimer.Interval = InstanceCommandIntervalMilliseconds;
+            _instanceCommandTimer.Tick += OnInstanceCommandTimerTick;
+
             _statusLabel = new Label();
             _statusLabel.AutoEllipsis = true;
             _statusLabel.Location = new Point(18, 208);
@@ -829,7 +1028,6 @@ namespace TerminalDropPath
 
             DragEnter += OnDragEnter;
             DragDrop += OnDragDrop;
-            Shown += OnFormShown;
             FormClosed += delegate(object sender, FormClosedEventArgs args)
             {
                 if (_clipboardListenerRegistered)
@@ -840,20 +1038,55 @@ namespace TerminalDropPath
                 _clipboardUpdateTimer.Stop();
                 _clipboardUpdateTimer.Tick -= OnClipboardUpdateTimerTick;
                 _clipboardUpdateTimer.Dispose();
+                _instanceCommandTimer.Stop();
+                _instanceCommandTimer.Tick -= OnInstanceCommandTimerTick;
+                _instanceCommandTimer.Dispose();
                 if (_targetWindowProcessHandle != IntPtr.Zero)
                 {
                     NativeMethods.CloseHandle(_targetWindowProcessHandle);
                     _targetWindowProcessHandle = IntPtr.Zero;
                 }
-                Shown -= OnFormShown;
                 _shellSelector.SelectedIndexChanged -= ShellSelectorChanged;
                 _copyModeSelector.SelectedIndexChanged -= CopyModeSelectorChanged;
                 _autoCleanCheckBox.CheckedChanged -= AutoCleanCheckBoxChanged;
                 copyButton.Click -= OnCopySelection;
                 _copyToolTip.Dispose();
             };
+        }
 
-            PositionNearTarget();
+        public bool StartMonitoring(bool showWindow)
+        {
+            IntPtr listenerWindow = Handle;
+            if (!IsOriginalTargetWindow())
+            {
+                if (!showWindow)
+                {
+                    return false;
+                }
+                DisableAutoClean("Could not track the target terminal; auto-clean disabled");
+                ShowUserInterface();
+                return true;
+            }
+
+            if (!NativeMethods.AddClipboardFormatListener(listenerWindow))
+            {
+                if (!showWindow)
+                {
+                    return false;
+                }
+                DisableAutoClean("Auto-clean unavailable (Windows error " + Marshal.GetLastWin32Error() + ")");
+                ShowUserInterface();
+                return true;
+            }
+
+            _clipboardListenerRegistered = true;
+            _instanceCommandTimer.Start();
+            SetStatus("Auto-clean ready", false);
+            if (showWindow)
+            {
+                ShowUserInterface();
+            }
+            return true;
         }
 
         protected override void WndProc(ref Message message)
@@ -869,7 +1102,7 @@ namespace TerminalDropPath
             bool targetIdentityValid = IsOriginalTargetWindow();
             if (!targetIdentityValid)
             {
-                DisableAutoClean("Target terminal closed; auto-clean stopped");
+                HandleTargetUnavailable();
                 return;
             }
             if (!ClipboardUpdatePolicy.ShouldQueue(
@@ -887,22 +1120,18 @@ namespace TerminalDropPath
             _clipboardUpdateTimer.Start();
         }
 
-        private void OnFormShown(object sender, EventArgs args)
+        private void OnInstanceCommandTimerTick(object sender, EventArgs args)
         {
+            if (_showWindowEvent.WaitOne(0))
+            {
+                ShowUserInterface();
+            }
+
             if (!IsOriginalTargetWindow())
             {
-                DisableAutoClean("Could not track the target terminal; auto-clean disabled");
+                HandleTargetUnavailable();
                 return;
             }
-
-            if (!NativeMethods.AddClipboardFormatListener(Handle))
-            {
-                DisableAutoClean("Auto-clean unavailable (Windows error " + Marshal.GetLastWin32Error() + ")");
-                return;
-            }
-
-            _clipboardListenerRegistered = true;
-            SetStatus("Auto-clean ready", false);
         }
 
         private void ShellSelectorChanged(object sender, EventArgs args)
@@ -936,7 +1165,7 @@ namespace TerminalDropPath
             bool targetIdentityValid = IsOriginalTargetWindow();
             if (!targetIdentityValid)
             {
-                DisableAutoClean("Target terminal closed; auto-clean stopped");
+                HandleTargetUnavailable();
                 return;
             }
             if (currentSequence != expectedSequence ||
@@ -978,6 +1207,27 @@ namespace TerminalDropPath
             }
 
             SetCopyStatus("Terminal copy cleaned", mergedLineBreaks);
+        }
+
+        private void ShowUserInterface()
+        {
+            PositionNearTarget();
+            if (!Visible)
+            {
+                Show();
+            }
+            if (WindowState == FormWindowState.Minimized)
+            {
+                WindowState = FormWindowState.Normal;
+            }
+            BringToFront();
+            Activate();
+        }
+
+        private void HandleTargetUnavailable()
+        {
+            _instanceCommandTimer.Stop();
+            Close();
         }
 
         private bool IsOriginalTargetWindow()
@@ -1536,6 +1786,136 @@ namespace TerminalDropPath
 
     }
 
+    internal static class BackgroundSelfTest
+    {
+        public static int Run(string executablePath)
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            Form target = new Form();
+            Process firstInstance = null;
+            Process duplicateInstance = null;
+            try
+            {
+                target.CreateControl();
+                IntPtr targetWindow = target.Handle;
+                int targetProcessId = Process.GetCurrentProcess().Id;
+
+                firstInstance = StartBackgroundInstance(
+                    executablePath,
+                    targetWindow,
+                    targetProcessId);
+                Thread.Sleep(750);
+                firstInstance.Refresh();
+                if (firstInstance.HasExited)
+                {
+                    throw new InvalidOperationException(
+                        "The background instance exited before the target window closed.");
+                }
+                if (HasVisibleTopLevelWindow(firstInstance.Id))
+                {
+                    firstInstance.Refresh();
+                    throw new InvalidOperationException(
+                        "The background instance exposed a visible top-level window: " +
+                        firstInstance.MainWindowHandle.ToInt64() + " [" +
+                        firstInstance.MainWindowTitle + "].");
+                }
+
+                duplicateInstance = StartBackgroundInstance(
+                    executablePath,
+                    targetWindow,
+                    targetProcessId);
+                if (!duplicateInstance.WaitForExit(3000) || duplicateInstance.ExitCode != 0)
+                {
+                    throw new InvalidOperationException(
+                        "A duplicate background instance was not rejected cleanly.");
+                }
+
+                target.Dispose();
+                if (!firstInstance.WaitForExit(4000) || firstInstance.ExitCode != 0)
+                {
+                    throw new InvalidOperationException(
+                        "The background instance did not exit after the target window closed.");
+                }
+
+                Console.WriteLine("Hidden background lifecycle self-test passed.");
+                return 0;
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine(exception.Message);
+                return 1;
+            }
+            finally
+            {
+                target.Dispose();
+                StopTestProcess(duplicateInstance);
+                StopTestProcess(firstInstance);
+            }
+        }
+
+        private static Process StartBackgroundInstance(
+            string executablePath,
+            IntPtr targetWindow,
+            int targetProcessId)
+        {
+            ProcessStartInfo startInfo = new ProcessStartInfo();
+            startInfo.FileName = executablePath;
+            startInfo.Arguments = "--target-hwnd " + targetWindow.ToInt64() +
+                " --target-pid " + targetProcessId + " --shell cmd";
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = true;
+            startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+
+            Process process = Process.Start(startInfo);
+            if (process == null)
+            {
+                throw new InvalidOperationException("Could not start a background test instance.");
+            }
+            return process;
+        }
+
+        private static bool HasVisibleTopLevelWindow(int processId)
+        {
+            bool found = false;
+            NativeMethods.EnumWindows(
+                delegate(IntPtr window, IntPtr parameter)
+                {
+                    uint ownerProcessId;
+                    NativeMethods.GetWindowThreadProcessId(window, out ownerProcessId);
+                    if (ownerProcessId == (uint)processId && NativeMethods.IsWindowVisible(window))
+                    {
+                        found = true;
+                        return false;
+                    }
+                    return true;
+                },
+                IntPtr.Zero);
+            return found;
+        }
+
+        private static void StopTestProcess(Process process)
+        {
+            if (process == null)
+            {
+                return;
+            }
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit();
+                }
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+    }
+
     internal static class InputSelfTest
     {
         public static int Run()
@@ -1680,6 +2060,8 @@ namespace TerminalDropPath
             public string executableFile;
         }
 
+        internal delegate bool EnumWindowsCallback(IntPtr window, IntPtr parameter);
+
         [DllImport("kernel32.dll")]
         internal static extern IntPtr GetConsoleWindow();
 
@@ -1763,6 +2145,10 @@ namespace TerminalDropPath
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool IsWindowVisible(IntPtr window);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
