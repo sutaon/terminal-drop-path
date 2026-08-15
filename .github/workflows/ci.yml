@@ -29,7 +29,7 @@ jobs:
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: TerminalDropPath-v0.2.0-windows
+          name: TerminalDropPath-v0.2.1-windows
           path: |
-            dist/TerminalDropPath-v0.2.0-windows.zip
-            dist/TerminalDropPath-v0.2.0-windows.zip.sha256
+            dist/TerminalDropPath-v0.2.1-windows.zip
+            dist/TerminalDropPath-v0.2.1-windows.zip.sha256
