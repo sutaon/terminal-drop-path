@@ -10,12 +10,12 @@ using System.Threading;
 using System.Windows.Forms;
 
 [assembly: System.Reflection.AssemblyTitle("Terminal Drop Path")]
-[assembly: System.Reflection.AssemblyDescription("Types dropped file and folder paths into classic Windows terminals.")]
+[assembly: System.Reflection.AssemblyDescription("Drops paths and copies selections cleanly in classic Windows terminals.")]
 [assembly: System.Reflection.AssemblyCompany("sutaon")]
 [assembly: System.Reflection.AssemblyProduct("Terminal Drop Path")]
 [assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 sutaon")]
-[assembly: System.Reflection.AssemblyVersion("0.1.1.0")]
-[assembly: System.Reflection.AssemblyFileVersion("0.1.1.0")]
+[assembly: System.Reflection.AssemblyVersion("0.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("0.2.0.0")]
 
 namespace TerminalDropPath
 {
@@ -26,12 +26,21 @@ namespace TerminalDropPath
         PowerShell
     }
 
+    internal enum CopyMode
+    {
+        Paragraphs,
+        SingleLine
+    }
+
     internal sealed class Options
     {
         public bool FormatOnly;
         public bool InputSelfTest;
+        public bool NormalizeCopy;
         public bool ShowHelp;
+        public int TargetProcessId;
         public long TargetWindow;
+        public CopyMode Copy = CopyMode.Paragraphs;
         public ShellMode Shell = ShellMode.Auto;
         public readonly List<string> Paths = new List<string>();
 
@@ -62,6 +71,15 @@ namespace TerminalDropPath
                 {
                     options.InputSelfTest = true;
                 }
+                else if (argument == "--normalize-copy")
+                {
+                    if (++index >= args.Length || !TryParseCopyMode(args[index], out options.Copy))
+                    {
+                        error = "--normalize-copy must be paragraphs or single-line.";
+                        return false;
+                    }
+                    options.NormalizeCopy = true;
+                }
                 else if (argument == "--help" || argument == "-h" || argument == "/?")
                 {
                     options.ShowHelp = true;
@@ -82,6 +100,14 @@ namespace TerminalDropPath
                         return false;
                     }
                 }
+                else if (argument == "--target-pid")
+                {
+                    if (++index >= args.Length || !int.TryParse(args[index], out options.TargetProcessId) || options.TargetProcessId <= 0)
+                    {
+                        error = "--target-pid must be a positive process ID.";
+                        return false;
+                    }
+                }
                 else
                 {
                     error = "Unknown argument: " + argument;
@@ -92,6 +118,19 @@ namespace TerminalDropPath
             if (options.FormatOnly && options.Paths.Count == 0)
             {
                 error = "--format-only requires at least one path after --.";
+                return false;
+            }
+
+            if (options.NormalizeCopy && (options.FormatOnly || options.InputSelfTest || options.Paths.Count > 0 ||
+                options.TargetWindow != 0 || options.TargetProcessId != 0))
+            {
+                error = "--normalize-copy cannot be combined with another operation or path arguments.";
+                return false;
+            }
+
+            if ((options.TargetWindow == 0) != (options.TargetProcessId == 0))
+            {
+                error = "--target-hwnd and --target-pid must be provided together.";
                 return false;
             }
 
@@ -120,6 +159,24 @@ namespace TerminalDropPath
             shell = ShellMode.Auto;
             return false;
         }
+
+        private static bool TryParseCopyMode(string value, out CopyMode mode)
+        {
+            if (string.Equals(value, "paragraphs", StringComparison.OrdinalIgnoreCase))
+            {
+                mode = CopyMode.Paragraphs;
+                return true;
+            }
+            if (string.Equals(value, "single-line", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(value, "singleline", StringComparison.OrdinalIgnoreCase))
+            {
+                mode = CopyMode.SingleLine;
+                return true;
+            }
+
+            mode = CopyMode.Paragraphs;
+            return false;
+        }
     }
 
     internal static class Program
@@ -127,8 +184,6 @@ namespace TerminalDropPath
         [STAThread]
         private static int Main(string[] args)
         {
-            Console.OutputEncoding = Encoding.UTF8;
-
             Options options;
             string parseError;
             if (!Options.TryParse(args, out options, out parseError))
@@ -144,13 +199,18 @@ namespace TerminalDropPath
                 return 0;
             }
 
+            if (options.NormalizeCopy)
+            {
+                return NormalizeCopiedText(options.Copy);
+            }
+
             ShellMode shell = options.Shell == ShellMode.Auto ? ShellDetector.Detect() : options.Shell;
 
             if (options.FormatOnly)
             {
                 try
                 {
-                    Console.WriteLine(PathFormatter.Format(options.Paths, shell));
+                    WriteUtf8Line(PathFormatter.Format(options.Paths, shell));
                     return 0;
                 }
                 catch (Exception exception)
@@ -183,7 +243,7 @@ namespace TerminalDropPath
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new DropPathForm(targetWindow, shell));
+            Application.Run(new DropPathForm(targetWindow, options.TargetProcessId, shell));
             return 0;
         }
 
@@ -200,10 +260,18 @@ namespace TerminalDropPath
                 return 1;
             }
 
+            int targetProcessId = ShellDetector.FindConsoleProcessId();
+            if (targetProcessId <= 0)
+            {
+                Console.Error.WriteLine("Unable to identify the CMD or PowerShell process attached to this console.");
+                return 1;
+            }
+
             string shellArgument = shell == ShellMode.Cmd ? "cmd" : "powershell";
             ProcessStartInfo startInfo = new ProcessStartInfo();
             startInfo.FileName = Application.ExecutablePath;
-            startInfo.Arguments = "--target-hwnd " + consoleWindow.ToInt64() + " --shell " + shellArgument;
+            startInfo.Arguments = "--target-hwnd " + consoleWindow.ToInt64() +
+                " --target-pid " + targetProcessId + " --shell " + shellArgument;
             startInfo.UseShellExecute = false;
             startInfo.CreateNoWindow = true;
             startInfo.WindowStyle = ProcessWindowStyle.Normal;
@@ -222,10 +290,57 @@ namespace TerminalDropPath
 
         private static void PrintHelp()
         {
-            Console.WriteLine("Terminal Drop Path 0.1.1");
+            Console.WriteLine("Terminal Drop Path 0.2.0");
             Console.WriteLine("Usage:");
             Console.WriteLine("  TerminalDropPath.exe [--shell auto|cmd|powershell]");
             Console.WriteLine("  TerminalDropPath.exe --format-only --shell cmd -- <path> [path...]");
+            Console.WriteLine("  TerminalDropPath.exe --normalize-copy paragraphs|single-line < input.txt");
+        }
+
+        private static int NormalizeCopiedText(CopyMode mode)
+        {
+            try
+            {
+                string input;
+                using (StreamReader reader = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false)))
+                {
+                    input = reader.ReadToEnd();
+                }
+
+                using (StreamWriter writer = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)))
+                {
+                    writer.Write(CopiedTextFormatter.Format(input, mode));
+                }
+                return 0;
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine(exception.Message);
+                return 1;
+            }
+        }
+
+        private static void WriteUtf8Line(string text)
+        {
+            if (Console.IsOutputRedirected)
+            {
+                using (StreamWriter writer = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)))
+                {
+                    writer.WriteLine(text);
+                }
+                return;
+            }
+
+            Encoding originalEncoding = Console.OutputEncoding;
+            try
+            {
+                Console.OutputEncoding = new UTF8Encoding(false);
+                Console.WriteLine(text);
+            }
+            finally
+            {
+                Console.OutputEncoding = originalEncoding;
+            }
         }
     }
 
@@ -260,6 +375,11 @@ namespace TerminalDropPath
 
         private static string FormatOne(string path, ShellMode shell)
         {
+            if (shell == ShellMode.Cmd && (path.IndexOf('%') >= 0 || path.IndexOf('!') >= 0))
+            {
+                throw new ArgumentException("CMD cannot safely preserve % or ! in a path; use PowerShell mode.", "paths");
+            }
+
             if (!NeedsQuoting(path))
             {
                 return path;
@@ -293,10 +413,12 @@ namespace TerminalDropPath
 
     internal static class ShellDetector
     {
+        private const int MaximumParentDepth = 8;
+
         public static ShellMode Detect()
         {
             int processId = Process.GetCurrentProcess().Id;
-            for (int depth = 0; depth < 8; depth++)
+            for (int depth = 0; depth < MaximumParentDepth; depth++)
             {
                 processId = NativeMethods.GetParentProcessId(processId);
                 if (processId <= 0)
@@ -325,22 +447,196 @@ namespace TerminalDropPath
 
             return ShellMode.PowerShell;
         }
+
+        public static int FindConsoleProcessId()
+        {
+            int currentProcessId = Process.GetCurrentProcess().Id;
+            uint[] processIds = new uint[64];
+            uint processCount = NativeMethods.GetConsoleProcessList(processIds, (uint)processIds.Length);
+            if (processCount > processIds.Length)
+            {
+                if (processCount > int.MaxValue)
+                {
+                    return 0;
+                }
+                processIds = new uint[(int)processCount];
+                processCount = NativeMethods.GetConsoleProcessList(processIds, (uint)processIds.Length);
+            }
+
+            HashSet<uint> attachedProcessIds = new HashSet<uint>();
+            int usableCount = (int)Math.Min(processCount, (uint)processIds.Length);
+            for (int index = 0; index < usableCount; index++)
+            {
+                attachedProcessIds.Add(processIds[index]);
+            }
+
+            int processId = currentProcessId;
+            int shellProcessId = 0;
+            for (int depth = 0; depth < MaximumParentDepth; depth++)
+            {
+                processId = NativeMethods.GetParentProcessId(processId);
+                if (processId <= 0)
+                {
+                    break;
+                }
+
+                try
+                {
+                    string name = Process.GetProcessById(processId).ProcessName;
+                    if (attachedProcessIds.Contains((uint)processId) &&
+                        (string.Equals(name, "cmd", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(name, "powershell", StringComparison.OrdinalIgnoreCase) ||
+                         string.Equals(name, "pwsh", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        shellProcessId = processId;
+                    }
+                }
+                catch (ArgumentException)
+                {
+                    break;
+                }
+            }
+
+            if (shellProcessId > 0)
+            {
+                return shellProcessId;
+            }
+
+            for (int index = 0; index < usableCount; index++)
+            {
+                if (processIds[index] != 0 && processIds[index] != (uint)currentProcessId)
+                {
+                    return (int)processIds[index];
+                }
+            }
+
+            return 0;
+        }
+    }
+
+    internal static class CopiedTextFormatter
+    {
+        private const string WindowsNewLine = "\r\n";
+
+        public static string Format(string text, CopyMode mode)
+        {
+            if (text == null)
+            {
+                throw new ArgumentNullException("text");
+            }
+
+            string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+            if (mode == CopyMode.SingleLine)
+            {
+                return normalized.Replace("\n", string.Empty);
+            }
+
+            string[] lines = normalized.Split(new[] { '\n' }, StringSplitOptions.None);
+            StringBuilder result = new StringBuilder(text.Length);
+            for (int index = 0; index < lines.Length; index++)
+            {
+                string current = lines[index];
+                result.Append(current);
+                if (index == lines.Length - 1)
+                {
+                    continue;
+                }
+
+                string next = lines[index + 1];
+                if (string.IsNullOrWhiteSpace(current) || string.IsNullOrWhiteSpace(next))
+                {
+                    result.Append(WindowsNewLine);
+                }
+                else
+                {
+                    result.Append(GetParagraphJoiner(current, next));
+                }
+            }
+
+            return result.ToString();
+        }
+
+        public static int CountLineBreaks(string text)
+        {
+            int count = 0;
+            for (int index = 0; index < text.Length; index++)
+            {
+                if (text[index] == '\r')
+                {
+                    count++;
+                    if (index + 1 < text.Length && text[index + 1] == '\n')
+                    {
+                        index++;
+                    }
+                }
+                else if (text[index] == '\n')
+                {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        private static string GetParagraphJoiner(string current, string next)
+        {
+            char previousCharacter = current[current.Length - 1];
+            char nextCharacter = next[0];
+            int previousCodePoint = char.IsLowSurrogate(previousCharacter) && current.Length > 1 && char.IsHighSurrogate(current[current.Length - 2])
+                ? char.ConvertToUtf32(current[current.Length - 2], previousCharacter)
+                : previousCharacter;
+            int nextCodePoint = char.IsHighSurrogate(nextCharacter) && next.Length > 1 && char.IsLowSurrogate(next[1])
+                ? char.ConvertToUtf32(nextCharacter, next[1])
+                : nextCharacter;
+            if (char.IsWhiteSpace(previousCharacter) || char.IsWhiteSpace(nextCharacter) ||
+                IsCjk(previousCodePoint) || IsCjk(nextCodePoint) ||
+                IsNoSpaceAfter(previousCharacter) || IsNoSpaceBefore(nextCharacter))
+            {
+                return string.Empty;
+            }
+
+            return " ";
+        }
+
+        private static bool IsCjk(int codePoint)
+        {
+            return (codePoint >= 0x2E80 && codePoint <= 0x9FFF) ||
+                   (codePoint >= 0xAC00 && codePoint <= 0xD7AF) ||
+                   (codePoint >= 0xF900 && codePoint <= 0xFAFF) ||
+                   (codePoint >= 0xFF00 && codePoint <= 0xFFEF) ||
+                   (codePoint >= 0x20000 && codePoint <= 0x2FA1F);
+        }
+
+        private static bool IsNoSpaceBefore(char character)
+        {
+            return ",.;:!?%)]}>/\\'\"-".IndexOf(character) >= 0;
+        }
+
+        private static bool IsNoSpaceAfter(char character)
+        {
+            return "([{</\\-".IndexOf(character) >= 0;
+        }
     }
 
     internal sealed class DropPathForm : Form
     {
         private readonly IntPtr _targetWindow;
+        private readonly ComboBox _copyModeSelector;
+        private readonly ToolTip _copyToolTip;
         private readonly Label _statusLabel;
         private readonly ComboBox _shellSelector;
+        private readonly int _targetProcessId;
+        private CopyMode _copyMode;
         private ShellMode _shell;
 
-        public DropPathForm(IntPtr targetWindow, ShellMode shell)
+        public DropPathForm(IntPtr targetWindow, int targetProcessId, ShellMode shell)
         {
             _targetWindow = targetWindow;
+            _targetProcessId = targetProcessId;
             _shell = shell;
+            _copyMode = CopyMode.Paragraphs;
 
             Text = "Terminal Drop Path";
-            ClientSize = new Size(340, 142);
+            ClientSize = new Size(340, 218);
             MinimumSize = Size;
             MaximumSize = Size;
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
@@ -357,7 +653,7 @@ namespace TerminalDropPath
             titleLabel.AutoSize = false;
             titleLabel.Location = new Point(18, 16);
             titleLabel.Size = new Size(304, 28);
-            titleLabel.Text = "Drop files or folders";
+            titleLabel.Text = "Drop paths or copy clean text";
             titleLabel.TextAlign = ContentAlignment.MiddleLeft;
             titleLabel.Font = new Font(Font.FontFamily, 12F, FontStyle.Bold);
             Controls.Add(titleLabel);
@@ -389,9 +685,36 @@ namespace TerminalDropPath
             };
             Controls.Add(topMostCheckBox);
 
+            Label copyModeLabel = new Label();
+            copyModeLabel.AutoSize = true;
+            copyModeLabel.Location = new Point(18, 94);
+            copyModeLabel.Text = "Copy mode";
+            Controls.Add(copyModeLabel);
+
+            _copyModeSelector = new ComboBox();
+            _copyModeSelector.DropDownStyle = ComboBoxStyle.DropDownList;
+            _copyModeSelector.Location = new Point(103, 90);
+            _copyModeSelector.Size = new Size(219, 25);
+            _copyModeSelector.Items.Add("Keep paragraphs");
+            _copyModeSelector.Items.Add("One line");
+            _copyModeSelector.SelectedIndex = 0;
+            _copyModeSelector.SelectedIndexChanged += CopyModeSelectorChanged;
+            Controls.Add(_copyModeSelector);
+
+            Button copyButton = new Button();
+            copyButton.Location = new Point(18, 128);
+            copyButton.Size = new Size(304, 32);
+            copyButton.Text = "Copy terminal selection";
+            copyButton.UseVisualStyleBackColor = true;
+            copyButton.Click += OnCopySelection;
+            Controls.Add(copyButton);
+
+            _copyToolTip = new ToolTip();
+            _copyToolTip.SetToolTip(copyButton, "Select text in the target terminal, then copy it without unwanted wrapped-line breaks.");
+
             _statusLabel = new Label();
             _statusLabel.AutoEllipsis = true;
-            _statusLabel.Location = new Point(18, 96);
+            _statusLabel.Location = new Point(18, 178);
             _statusLabel.Size = new Size(304, 24);
             _statusLabel.Text = "Ready";
             _statusLabel.ForeColor = Color.FromArgb(74, 85, 104);
@@ -402,6 +725,9 @@ namespace TerminalDropPath
             FormClosed += delegate(object sender, FormClosedEventArgs args)
             {
                 _shellSelector.SelectedIndexChanged -= ShellSelectorChanged;
+                _copyModeSelector.SelectedIndexChanged -= CopyModeSelectorChanged;
+                copyButton.Click -= OnCopySelection;
+                _copyToolTip.Dispose();
             };
 
             PositionNearTarget();
@@ -410,6 +736,33 @@ namespace TerminalDropPath
         private void ShellSelectorChanged(object sender, EventArgs args)
         {
             _shell = _shellSelector.SelectedIndex == 0 ? ShellMode.Cmd : ShellMode.PowerShell;
+        }
+
+        private void CopyModeSelectorChanged(object sender, EventArgs args)
+        {
+            _copyMode = _copyModeSelector.SelectedIndex == 1 ? CopyMode.SingleLine : CopyMode.Paragraphs;
+        }
+
+        private void OnCopySelection(object sender, EventArgs args)
+        {
+            SetStatus("Copying terminal selection...", false);
+
+            int mergedLineBreaks;
+            string error;
+            if (!ConsoleSelectionCopier.TryCopy(Handle, _targetWindow, _targetProcessId, _copyMode, out mergedLineBreaks, out error))
+            {
+                SetStatus(error, true);
+                return;
+            }
+
+            if (mergedLineBreaks == 0)
+            {
+                SetStatus("Copied; no extra line breaks found", false);
+            }
+            else
+            {
+                SetStatus("Copied; merged " + mergedLineBreaks + (mergedLineBreaks == 1 ? " line break" : " line breaks"), false);
+            }
         }
 
         private void OnDragEnter(object sender, DragEventArgs args)
@@ -476,6 +829,259 @@ namespace TerminalDropPath
         }
     }
 
+    internal static class ConsoleSelectionCopier
+    {
+        // Classic conhost routes this WM_COMMAND ID through its native wrap-aware copy path.
+        private const uint CommandCopy = 0xFFF0;
+        private const uint MessageCommand = 0x0111;
+        private const uint SelectionNotEmpty = 0x0002;
+        private const uint SendMessageAbortIfHung = 0x0002;
+        private static readonly TimeSpan ClipboardTimeout = TimeSpan.FromSeconds(2);
+
+        public static bool TryCopy(IntPtr clipboardOwnerWindow, IntPtr targetWindow, int targetProcessId, CopyMode mode, out int mergedLineBreaks, out string error)
+        {
+            mergedLineBreaks = 0;
+            error = null;
+
+            if (!KeyboardInjector.TryActivateTarget(targetWindow, out error))
+            {
+                return false;
+            }
+
+            Thread.Sleep(100);
+
+            NativeMethods.FreeConsole();
+            if (!NativeMethods.AttachConsole((uint)targetProcessId))
+            {
+                error = "Could not attach to the target terminal (Windows error " + Marshal.GetLastWin32Error() + ")";
+                return false;
+            }
+
+            try
+            {
+                if (NativeMethods.GetConsoleWindow() != targetWindow)
+                {
+                    error = "The target terminal process no longer belongs to the original console";
+                    return false;
+                }
+
+                NativeMethods.CONSOLE_SELECTION_INFO selection;
+                if (!NativeMethods.GetConsoleSelectionInfo(out selection))
+                {
+                    error = "Could not read the terminal selection (Windows error " + Marshal.GetLastWin32Error() + ")";
+                    return false;
+                }
+                if ((selection.flags & SelectionNotEmpty) == 0)
+                {
+                    error = "Select text in the target terminal first";
+                    return false;
+                }
+
+                uint previousSequence = NativeMethods.GetClipboardSequenceNumber();
+                UIntPtr messageResult;
+                if (NativeMethods.SendMessageTimeout(
+                        targetWindow,
+                        MessageCommand,
+                        new UIntPtr(CommandCopy),
+                        IntPtr.Zero,
+                        SendMessageAbortIfHung,
+                        1000,
+                        out messageResult) == IntPtr.Zero)
+                {
+                    error = "The terminal did not accept the copy command (Windows error " + Marshal.GetLastWin32Error() + ")";
+                    return false;
+                }
+
+                string copiedText;
+                uint copiedSequence;
+                if (!ClipboardAccess.TryWaitForText(previousSequence, targetWindow, ClipboardTimeout, out copiedText, out copiedSequence, out error))
+                {
+                    return false;
+                }
+
+                string formatted = CopiedTextFormatter.Format(copiedText, mode);
+                mergedLineBreaks = CopiedTextFormatter.CountLineBreaks(copiedText) - CopiedTextFormatter.CountLineBreaks(formatted);
+                if (!string.Equals(formatted, copiedText, StringComparison.Ordinal) &&
+                    !ClipboardAccess.TryReplaceText(clipboardOwnerWindow, formatted, copiedSequence, targetWindow, out error))
+                {
+                    return false;
+                }
+
+                return true;
+            }
+            finally
+            {
+                NativeMethods.FreeConsole();
+            }
+        }
+    }
+
+    internal static class ClipboardAccess
+    {
+        private const uint ClipboardUnicodeText = 13;
+        private const uint GlobalMemoryMoveable = 0x0002;
+        private const int RetryCount = 8;
+        private const int RetryDelayMilliseconds = 25;
+
+        public static bool TryWaitForText(
+            uint previousSequence,
+            IntPtr expectedOwner,
+            TimeSpan timeout,
+            out string text,
+            out uint copiedSequence,
+            out string error)
+        {
+            DateTime deadline = DateTime.UtcNow.Add(timeout);
+            do
+            {
+                uint observedSequence = NativeMethods.GetClipboardSequenceNumber();
+                if (observedSequence != previousSequence &&
+                    NativeMethods.GetClipboardOwner() == expectedOwner &&
+                    TryGetText(out text, out error) &&
+                    NativeMethods.GetClipboardSequenceNumber() == observedSequence &&
+                    NativeMethods.GetClipboardOwner() == expectedOwner)
+                {
+                    copiedSequence = observedSequence;
+                    return true;
+                }
+                Thread.Sleep(20);
+            }
+            while (DateTime.UtcNow < deadline);
+
+            text = null;
+            copiedSequence = 0;
+            error = "The terminal did not place text on the clipboard";
+            return false;
+        }
+
+        public static bool TryReplaceText(
+            IntPtr newOwnerWindow,
+            string text,
+            uint expectedSequence,
+            IntPtr expectedOwner,
+            out string error)
+        {
+            IntPtr globalMemory = IntPtr.Zero;
+            bool clipboardOwnsMemory = false;
+            try
+            {
+                try
+                {
+                    int byteCount = checked((text.Length + 1) * sizeof(char));
+                    globalMemory = NativeMethods.GlobalAlloc(GlobalMemoryMoveable, new UIntPtr((uint)byteCount));
+                }
+                catch (OverflowException)
+                {
+                    error = "The selected text is too large to place on the clipboard";
+                    return false;
+                }
+
+                if (globalMemory == IntPtr.Zero)
+                {
+                    error = "Could not allocate clipboard memory (Windows error " + Marshal.GetLastWin32Error() + ")";
+                    return false;
+                }
+
+                IntPtr destination = NativeMethods.GlobalLock(globalMemory);
+                if (destination == IntPtr.Zero)
+                {
+                    error = "Could not prepare clipboard text (Windows error " + Marshal.GetLastWin32Error() + ")";
+                    return false;
+                }
+
+                try
+                {
+                    if (text.Length > 0)
+                    {
+                        Marshal.Copy(text.ToCharArray(), 0, destination, text.Length);
+                    }
+                    Marshal.WriteInt16(destination, text.Length * sizeof(char), 0);
+                }
+                finally
+                {
+                    NativeMethods.GlobalUnlock(globalMemory);
+                }
+
+                for (int attempt = 0; attempt < RetryCount; attempt++)
+                {
+                    if (!NativeMethods.OpenClipboard(newOwnerWindow))
+                    {
+                        Thread.Sleep(RetryDelayMilliseconds);
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (NativeMethods.GetClipboardSequenceNumber() != expectedSequence ||
+                            NativeMethods.GetClipboardOwner() != expectedOwner)
+                        {
+                            error = "The clipboard changed before the cleaned text could be written; copy again";
+                            return false;
+                        }
+                        if (!NativeMethods.EmptyClipboard())
+                        {
+                            error = "Could not clear the clipboard (Windows error " + Marshal.GetLastWin32Error() + ")";
+                            return false;
+                        }
+                        if (NativeMethods.SetClipboardData(ClipboardUnicodeText, globalMemory) == IntPtr.Zero)
+                        {
+                            error = "Could not place the cleaned text on the clipboard (Windows error " + Marshal.GetLastWin32Error() + ")";
+                            return false;
+                        }
+
+                        clipboardOwnsMemory = true;
+                        error = null;
+                        return true;
+                    }
+                    finally
+                    {
+                        NativeMethods.CloseClipboard();
+                    }
+                }
+
+                error = "The clipboard is busy; try the copy action again";
+                return false;
+            }
+            finally
+            {
+                if (globalMemory != IntPtr.Zero && !clipboardOwnsMemory)
+                {
+                    NativeMethods.GlobalFree(globalMemory);
+                }
+            }
+        }
+
+        private static bool TryGetText(out string text, out string error)
+        {
+            for (int attempt = 0; attempt < RetryCount; attempt++)
+            {
+                try
+                {
+                    if (!Clipboard.ContainsText(TextDataFormat.UnicodeText))
+                    {
+                        text = null;
+                        error = "The terminal selection did not contain text";
+                        return false;
+                    }
+
+                    text = Clipboard.GetText(TextDataFormat.UnicodeText);
+                    error = null;
+                    return true;
+                }
+                catch (ExternalException exception)
+                {
+                    text = null;
+                    error = exception.Message;
+                    Thread.Sleep(RetryDelayMilliseconds);
+                }
+            }
+
+            text = null;
+            error = "The clipboard is busy; try the copy action again";
+            return false;
+        }
+    }
+
     internal static class KeyboardInjector
     {
         private const uint InputKeyboard = 1;
@@ -507,6 +1113,12 @@ namespace TerminalDropPath
                 inputs[inputIndex++] = CreateUnicodeInput(character, true);
             }
 
+            if (NativeMethods.GetForegroundWindow() != targetWindow)
+            {
+                error = "Target terminal lost focus before input could be sent";
+                return false;
+            }
+
             uint sent = NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT)));
             if (sent != inputs.Length)
             {
@@ -514,6 +1126,22 @@ namespace TerminalDropPath
                 return false;
             }
 
+            return true;
+        }
+
+        public static bool TryActivateTarget(IntPtr targetWindow, out string error)
+        {
+            error = null;
+            if (!NativeMethods.IsWindow(targetWindow))
+            {
+                error = "Target terminal was closed";
+                return false;
+            }
+            if (!TryActivate(targetWindow))
+            {
+                error = "Could not focus the target terminal";
+                return false;
+            }
             return true;
         }
 
@@ -590,6 +1218,7 @@ namespace TerminalDropPath
             input.union.keyboard.extraInfo = UIntPtr.Zero;
             return input;
         }
+
     }
 
     internal static class InputSelfTest
@@ -644,6 +1273,30 @@ namespace TerminalDropPath
             public int Top;
             public int Right;
             public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct COORD
+        {
+            public short x;
+            public short y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SMALL_RECT
+        {
+            public short left;
+            public short top;
+            public short right;
+            public short bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct CONSOLE_SELECTION_INFO
+        {
+            public uint flags;
+            public COORD selectionAnchor;
+            public SMALL_RECT selection;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -714,6 +1367,65 @@ namespace TerminalDropPath
 
         [DllImport("kernel32.dll")]
         internal static extern IntPtr GetConsoleWindow();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool AttachConsole(uint processId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool FreeConsole();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern uint GetConsoleProcessList(uint[] processList, uint processCount);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetConsoleSelectionInfo(out CONSOLE_SELECTION_INFO selectionInfo);
+
+        [DllImport("user32.dll")]
+        internal static extern uint GetClipboardSequenceNumber();
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr GetClipboardOwner();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool OpenClipboard(IntPtr newOwner);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool CloseClipboard();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool EmptyClipboard();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern IntPtr SetClipboardData(uint format, IntPtr memory);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr GlobalLock(IntPtr memory);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GlobalUnlock(IntPtr memory);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        internal static extern IntPtr GlobalFree(IntPtr memory);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        internal static extern IntPtr SendMessageTimeout(
+            IntPtr window,
+            uint message,
+            UIntPtr wParam,
+            IntPtr lParam,
+            uint flags,
+            uint timeout,
+            out UIntPtr result);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]

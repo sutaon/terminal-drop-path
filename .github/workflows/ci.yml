@@ -22,13 +22,14 @@ jobs:
         shell: powershell
         run: .\tests\TerminalDropPath.Tests.ps1
 
-      - name: Upload executable
+      - name: Package
+        shell: powershell
+        run: .\package.ps1 -SkipBuild
+
+      - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: TerminalDropPath
+          name: TerminalDropPath-v0.2.0-windows
           path: |
-            bin/TerminalDropPath.exe
-            DropPath.cmd
-            DropPath.ps1
-            LICENSE
-            README.md
+            dist/TerminalDropPath-v0.2.0-windows.zip
+            dist/TerminalDropPath-v0.2.0-windows.zip.sha256
